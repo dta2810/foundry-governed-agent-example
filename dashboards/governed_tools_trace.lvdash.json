@@ -1,0 +1,1200 @@
+{
+  "datasets": [
+    {
+      "name": "ds_tool_calls",
+      "displayName": "Gateway MCP tool calls (system.ai_gateway.usage)",
+      "queryLines": [
+        "SELECT\n",
+        "  u.event_time,\n",
+        "  u.requester,\n",
+        "  CASE WHEN u.requester = :sp_app_id THEN concat(:sp_display_name, ' (SP)') ELSE u.requester END AS identity,\n",
+        "  CASE WHEN u.requester_type = 'SERVICE_PRINCIPAL' THEN 'Service principal' ELSE 'End user (OBO)' END AS identity_type,\n",
+        "  u.service_name AS mcp_service,\n",
+        "  concat(replace(u.service_name, 'system.ai.', ''), ' / ', coalesce(u.mcp_metadata.tool_name, 'unknown')) AS tool,\n",
+        "  u.status_code,\n",
+        "  CASE WHEN u.status_code BETWEEN 200 AND 299 THEN 'Success' WHEN u.status_code IN (401, 403) THEN 'Denied' ELSE 'Error' END AS outcome,\n",
+        "  CASE WHEN u.status_code BETWEEN 200 AND 299 THEN 1 ELSE 0 END AS is_success,\n",
+        "  CASE WHEN u.status_code IN (401, 403) THEN 1 ELSE 0 END AS is_denied,\n",
+        "  CASE WHEN CAST(u.event_time AS DATE) = current_date() THEN 1 ELSE 0 END AS is_today,\n",
+        "  u.latency_ms\n",
+        "FROM system.ai_gateway.usage u\n",
+        "WHERE u.workspace_id = :workspace_id\n",
+        "  AND u.requester IN (:user_email, :sp_app_id)  -- scoped identities only\n",
+        "  AND u.service_type = 'MCP_SERVICE'\n",
+        "  AND u.service_name IN ('system.ai.dbsql', 'system.ai.genie_one_mcp')\n",
+        "  AND u.mcp_metadata.json_rpc_method = 'tools/call'\n",
+        "  AND u.event_time >= :date_range.min AND u.event_time < date_add(:date_range.max, 1)\n"
+      ],
+      "parameters": [
+        {
+          "displayName": "date_range",
+          "keyword": "date_range",
+          "dataType": "DATE",
+          "complexType": "RANGE",
+          "defaultSelection": {
+            "range": {
+              "dataType": "DATE",
+              "min": {
+                "value": "now-7d/d"
+              },
+              "max": {
+                "value": "now/d"
+              }
+            }
+          }
+        },
+        {
+          "displayName": "workspace_id (deploy-time: this workspace)",
+          "keyword": "workspace_id",
+          "dataType": "STRING",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "<workspace-id>"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "displayName": "sp_app_id",
+          "keyword": "sp_app_id",
+          "dataType": "STRING",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "<regional-sp-app-id>"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "displayName": "sp_display_name",
+          "keyword": "sp_display_name",
+          "dataType": "STRING",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "<regional-sp-name>"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "displayName": "user_email",
+          "keyword": "user_email",
+          "dataType": "STRING",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "<user-email>"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "ds_statements",
+      "displayName": "SQL statements by agent tools (system.query.history)",
+      "queryLines": [
+        "SELECT\n",
+        "  q.start_time,\n",
+        "  q.statement_id,\n",
+        "  q.executed_by,\n",
+        "  CASE WHEN q.executed_by = :sp_app_id THEN concat(:sp_display_name, ' (SP)') ELSE q.executed_by END AS identity,\n",
+        "  q.executed_as,\n",
+        "  CASE WHEN q.client_application = 'Databricks SQL MCP' THEN 'dbsql / execute_sql' ELSE coalesce(q.client_application, 'unknown') END AS tool,\n",
+        "  q.compute.warehouse_id AS warehouse_id,\n",
+        "  coalesce(w.warehouse_name, q.compute.warehouse_id, 'unknown') AS warehouse,\n",
+        "  CASE WHEN q.statement_text = '<REDACTED>' THEN '(text redacted in query history)' ELSE left(regexp_replace(q.statement_text, '\\\\s+', ' '), 160) END AS statement_preview,\n",
+        "  coalesce(q.read_rows, 0) AS read_rows,\n",
+        "  round(q.total_duration_ms / 1000.0, 2) AS duration_s,\n",
+        "  q.execution_status,\n",
+        "  coalesce(regexp_extract(q.error_message, '^\\\\[([A-Z_.]+)\\\\]', 1), '') AS error_class,\n",
+        "  coalesce(regexp_extract(q.error_message, 'on [A-Za-z]+ \\'([^\\']+)\\'', 1), '') AS denied_object,\n",
+        "  coalesce(left(regexp_replace(q.error_message, '\\\\s+', ' '), 220), '') AS error_summary,\n",
+        "  CASE WHEN q.error_message LIKE '%INSUFFICIENT_PERMISSIONS%' OR q.error_message LIKE '%PERMISSION_DENIED%' THEN 1 ELSE 0 END AS is_denied,\n",
+        "  CASE WHEN q.execution_status = 'FAILED' THEN 1 ELSE 0 END AS is_failed\n",
+        "FROM system.query.history q\n",
+        "LEFT JOIN (\n",
+        "  SELECT warehouse_id, warehouse_name\n",
+        "  FROM system.compute.warehouses\n",
+        "  WHERE workspace_id = :workspace_id\n",
+        "  QUALIFY row_number() OVER (PARTITION BY warehouse_id ORDER BY change_time DESC) = 1\n",
+        ") w ON w.warehouse_id = q.compute.warehouse_id\n",
+        "WHERE q.workspace_id = :workspace_id\n",
+        "  AND q.executed_by IN (:user_email, :sp_app_id)  -- scoped identities only\n",
+        "  AND q.start_time >= :date_range.min AND q.start_time < date_add(:date_range.max, 1)\n",
+        "  AND (\n",
+        "    q.client_application = 'Databricks SQL MCP'\n",
+        "    OR q.statement_text ILIKE concat('%', :pricing_schema, '%')\n",
+        "    OR q.error_message ILIKE concat('%', :pricing_schema, '%')\n",
+        "  )\n",
+        "ORDER BY q.start_time DESC\n"
+      ],
+      "parameters": [
+        {
+          "displayName": "date_range",
+          "keyword": "date_range",
+          "dataType": "DATE",
+          "complexType": "RANGE",
+          "defaultSelection": {
+            "range": {
+              "dataType": "DATE",
+              "min": {
+                "value": "now-7d/d"
+              },
+              "max": {
+                "value": "now/d"
+              }
+            }
+          }
+        },
+        {
+          "displayName": "workspace_id (deploy-time: this workspace)",
+          "keyword": "workspace_id",
+          "dataType": "STRING",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "<workspace-id>"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "displayName": "sp_app_id",
+          "keyword": "sp_app_id",
+          "dataType": "STRING",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "<regional-sp-app-id>"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "displayName": "sp_display_name",
+          "keyword": "sp_display_name",
+          "dataType": "STRING",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "<regional-sp-name>"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "displayName": "pricing_schema",
+          "keyword": "pricing_schema",
+          "dataType": "STRING",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "<catalog>.<schema>"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "displayName": "user_email",
+          "keyword": "user_email",
+          "dataType": "STRING",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "<user-email>"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "ds_audit",
+      "displayName": "MCP audit trail (system.access.audit)",
+      "queryLines": [
+        "SELECT\n",
+        "  a.event_time,\n",
+        "  a.user_identity.email AS principal,\n",
+        "  CASE WHEN a.user_identity.email = :sp_app_id THEN concat(:sp_display_name, ' (SP)') ELSE a.user_identity.email END AS identity,\n",
+        "  a.request_params.fully_qualified_name AS mcp_service,\n",
+        "  concat(replace(a.request_params.fully_qualified_name, 'system.ai.', ''), ' / ', coalesce(a.request_params.tool_name, 'unknown')) AS tool,\n",
+        "  a.response.status_code AS status_code,\n",
+        "  CASE WHEN a.response.status_code BETWEEN 200 AND 299 THEN 'Success' WHEN a.response.status_code IN (401, 403) THEN 'Denied' ELSE 'Error' END AS outcome,\n",
+        "  coalesce(left(a.response.error_message, 200), '') AS error_message,\n",
+        "  a.source_ip_address\n",
+        "FROM system.access.audit a\n",
+        "WHERE a.workspace_id = :workspace_id\n",
+        "  AND a.user_identity.email IN (:user_email, :sp_app_id)  -- scoped identities only\n",
+        "  AND a.service_name = 'mcpService'\n",
+        "  AND a.action_name = 'mcpCall'\n",
+        "  AND a.request_params.json_rpc_method = 'tools/call'\n",
+        "  AND a.request_params.fully_qualified_name IN ('system.ai.dbsql', 'system.ai.genie_one_mcp')\n",
+        "  AND a.event_date >= :date_range.min AND a.event_date <= :date_range.max\n",
+        "  AND a.event_time >= :date_range.min AND a.event_time < date_add(:date_range.max, 1)\n",
+        "ORDER BY a.event_time DESC\n"
+      ],
+      "parameters": [
+        {
+          "displayName": "date_range",
+          "keyword": "date_range",
+          "dataType": "DATE",
+          "complexType": "RANGE",
+          "defaultSelection": {
+            "range": {
+              "dataType": "DATE",
+              "min": {
+                "value": "now-7d/d"
+              },
+              "max": {
+                "value": "now/d"
+              }
+            }
+          }
+        },
+        {
+          "displayName": "workspace_id (deploy-time: this workspace)",
+          "keyword": "workspace_id",
+          "dataType": "STRING",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "<workspace-id>"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "displayName": "sp_app_id",
+          "keyword": "sp_app_id",
+          "dataType": "STRING",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "<regional-sp-app-id>"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "displayName": "sp_display_name",
+          "keyword": "sp_display_name",
+          "dataType": "STRING",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "<regional-sp-name>"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "displayName": "user_email",
+          "keyword": "user_email",
+          "dataType": "STRING",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "<user-email>"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "traceability",
+      "displayName": "Traceability",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "title",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Governed agent tools — who asked what"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "subtitle",
+            "multilineTextboxSpec": {
+              "lines": [
+                "A Microsoft Foundry agent calls Databricks tools through Unity AI Gateway MCP (system.ai.dbsql, system.ai.genie_one_mcp) as the end user (Entra OBO) or as a service principal. Every call is attributed to the identity, the tool, the warehouse and the outcome."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 1,
+            "width": 12,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_calls_today",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_tool_calls",
+                  "fields": [
+                    {
+                      "name": "sum(is_today)",
+                      "expression": "SUM(`is_today`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(is_today)",
+                  "displayName": "Tool calls today",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Tool calls today",
+                "showDescription": true,
+                "description": "Gateway usage, ~30 min lag"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 3,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_identities",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_tool_calls",
+                  "fields": [
+                    {
+                      "name": "countdistinct(identity)",
+                      "expression": "COUNT(DISTINCT `identity`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "countdistinct(identity)",
+                  "displayName": "Distinct identities",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Distinct identities",
+                "showDescription": true,
+                "description": "Users + service principals"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 3,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_success",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_tool_calls",
+                  "fields": [
+                    {
+                      "name": "avg(is_success)",
+                      "expression": "AVG(`is_success`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "avg(is_success)",
+                  "displayName": "Tool-call success",
+                  "format": {
+                    "type": "number-percent",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 1
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Tool-call success",
+                "showDescription": true,
+                "description": "HTTP 2xx share of calls"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 3,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_denied",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_statements",
+                  "fields": [
+                    {
+                      "name": "sum(is_denied)",
+                      "expression": "SUM(`is_denied`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(is_denied)",
+                  "displayName": "Denied attempts",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Denied attempts",
+                "showDescription": true,
+                "description": "Blocked by Unity Catalog"
+              }
+            }
+          },
+          "position": {
+            "x": 9,
+            "y": 3,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "h_calls",
+            "multilineTextboxSpec": {
+              "lines": [
+                "### Who called which tool"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 6,
+            "width": 12,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_identity_tool",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_tool_calls",
+                  "fields": [
+                    {
+                      "name": "identity",
+                      "expression": "`identity`"
+                    },
+                    {
+                      "name": "tool",
+                      "expression": "`tool`"
+                    },
+                    {
+                      "name": "count(event_time)",
+                      "expression": "COUNT(`event_time`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "identity",
+                  "displayName": "Identity",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "y": {
+                  "fieldName": "count(event_time)",
+                  "displayName": "Tool calls",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "tool",
+                  "displayName": "Tool",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Tool calls by identity",
+                "showDescription": true,
+                "description": "Gateway MCP tools/call per identity, split by tool"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 7,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_warehouse",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_statements",
+                  "fields": [
+                    {
+                      "name": "warehouse",
+                      "expression": "`warehouse`"
+                    },
+                    {
+                      "name": "identity",
+                      "expression": "`identity`"
+                    },
+                    {
+                      "name": "count(statement_id)",
+                      "expression": "COUNT(`statement_id`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "warehouse",
+                  "displayName": "Warehouse",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "y": {
+                  "fieldName": "count(statement_id)",
+                  "displayName": "Statements",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "identity",
+                  "displayName": "Identity",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Statements by warehouse",
+                "showDescription": true,
+                "description": "Cost attribution: which warehouse ran each identity's SQL (bev-pricing-wh = dedicated)"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 7,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "h_who",
+            "multilineTextboxSpec": {
+              "lines": [
+                "### Who asked what"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 13,
+            "width": 12,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "tbl_who_asked_what",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_statements",
+                  "fields": [
+                    {
+                      "name": "start_time",
+                      "expression": "`start_time`"
+                    },
+                    {
+                      "name": "identity",
+                      "expression": "`identity`"
+                    },
+                    {
+                      "name": "tool",
+                      "expression": "`tool`"
+                    },
+                    {
+                      "name": "statement_preview",
+                      "expression": "`statement_preview`"
+                    },
+                    {
+                      "name": "warehouse",
+                      "expression": "`warehouse`"
+                    },
+                    {
+                      "name": "read_rows",
+                      "expression": "`read_rows`"
+                    },
+                    {
+                      "name": "duration_s",
+                      "expression": "`duration_s`"
+                    },
+                    {
+                      "name": "execution_status",
+                      "expression": "`execution_status`"
+                    },
+                    {
+                      "name": "statement_id",
+                      "expression": "`statement_id`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "start_time",
+                    "displayName": "Time"
+                  },
+                  {
+                    "fieldName": "identity",
+                    "displayName": "Identity"
+                  },
+                  {
+                    "fieldName": "tool",
+                    "displayName": "Tool"
+                  },
+                  {
+                    "fieldName": "statement_preview",
+                    "displayName": "Statement"
+                  },
+                  {
+                    "fieldName": "warehouse",
+                    "displayName": "Warehouse"
+                  },
+                  {
+                    "fieldName": "read_rows",
+                    "displayName": "Rows read"
+                  },
+                  {
+                    "fieldName": "duration_s",
+                    "displayName": "Duration (s)"
+                  },
+                  {
+                    "fieldName": "execution_status",
+                    "displayName": "Status"
+                  },
+                  {
+                    "fieldName": "statement_id",
+                    "displayName": "Statement id"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Statements executed by agent tools",
+                "showDescription": true,
+                "description": "system.query.history: SQL MCP statements and any statement touching the pricing schema. Executed as the calling identity."
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 14,
+            "width": 12,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "h_contain",
+            "multilineTextboxSpec": {
+              "lines": [
+                "### Containment — denied and failed statements"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 22,
+            "width": 12,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "tbl_denied",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_statements",
+                  "fields": [
+                    {
+                      "name": "start_time",
+                      "expression": "`start_time`"
+                    },
+                    {
+                      "name": "identity",
+                      "expression": "`identity`"
+                    },
+                    {
+                      "name": "error_class",
+                      "expression": "`error_class`"
+                    },
+                    {
+                      "name": "denied_object",
+                      "expression": "`denied_object`"
+                    },
+                    {
+                      "name": "error_summary",
+                      "expression": "`error_summary`"
+                    },
+                    {
+                      "name": "warehouse",
+                      "expression": "`warehouse`"
+                    },
+                    {
+                      "name": "statement_id",
+                      "expression": "`statement_id`"
+                    }
+                  ],
+                  "disaggregated": true,
+                  "filters": [
+                    {
+                      "expression": "`is_failed` = 1"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "start_time",
+                    "displayName": "Time"
+                  },
+                  {
+                    "fieldName": "identity",
+                    "displayName": "Identity"
+                  },
+                  {
+                    "fieldName": "error_class",
+                    "displayName": "Error class"
+                  },
+                  {
+                    "fieldName": "denied_object",
+                    "displayName": "Object"
+                  },
+                  {
+                    "fieldName": "error_summary",
+                    "displayName": "Error"
+                  },
+                  {
+                    "fieldName": "warehouse",
+                    "displayName": "Warehouse"
+                  },
+                  {
+                    "fieldName": "statement_id",
+                    "displayName": "Statement id"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Denied and failed statements",
+                "showDescription": true,
+                "description": "INSUFFICIENT_PERMISSIONS rows prove Unity Catalog stopped the identity at the table, not the agent prompt"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 23,
+            "width": 12,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "h_audit",
+            "multilineTextboxSpec": {
+              "lines": [
+                "### Gateway audit trail"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 29,
+            "width": 12,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "tbl_audit",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_audit",
+                  "fields": [
+                    {
+                      "name": "event_time",
+                      "expression": "`event_time`"
+                    },
+                    {
+                      "name": "identity",
+                      "expression": "`identity`"
+                    },
+                    {
+                      "name": "tool",
+                      "expression": "`tool`"
+                    },
+                    {
+                      "name": "status_code",
+                      "expression": "`status_code`"
+                    },
+                    {
+                      "name": "outcome",
+                      "expression": "`outcome`"
+                    },
+                    {
+                      "name": "error_message",
+                      "expression": "`error_message`"
+                    },
+                    {
+                      "name": "source_ip_address",
+                      "expression": "`source_ip_address`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "event_time",
+                    "displayName": "Time"
+                  },
+                  {
+                    "fieldName": "identity",
+                    "displayName": "Identity"
+                  },
+                  {
+                    "fieldName": "tool",
+                    "displayName": "Tool"
+                  },
+                  {
+                    "fieldName": "status_code",
+                    "displayName": "HTTP status"
+                  },
+                  {
+                    "fieldName": "outcome",
+                    "displayName": "Outcome"
+                  },
+                  {
+                    "fieldName": "error_message",
+                    "displayName": "Error"
+                  },
+                  {
+                    "fieldName": "source_ip_address",
+                    "displayName": "Source IP"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "MCP tool calls in the audit log",
+                "showDescription": true,
+                "description": "system.access.audit, service mcpService / action mcpCall (lower lag than Gateway usage)"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 30,
+            "width": 12,
+            "height": 6
+          }
+        }
+      ]
+    },
+    {
+      "name": "global_filters",
+      "displayName": "Filters",
+      "pageType": "PAGE_TYPE_GLOBAL_FILTERS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "f_date_range",
+            "queries": [
+              {
+                "name": "q_ds_tool_calls",
+                "query": {
+                  "datasetName": "ds_tool_calls",
+                  "parameters": [
+                    {
+                      "name": "date_range",
+                      "keyword": "date_range"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "q_ds_statements",
+                "query": {
+                  "datasetName": "ds_statements",
+                  "parameters": [
+                    {
+                      "name": "date_range",
+                      "keyword": "date_range"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "q_ds_audit",
+                "query": {
+                  "datasetName": "ds_audit",
+                  "parameters": [
+                    {
+                      "name": "date_range",
+                      "keyword": "date_range"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-date-range-picker",
+              "encodings": {
+                "fields": [
+                  {
+                    "parameterName": "date_range",
+                    "queryName": "q_ds_tool_calls"
+                  },
+                  {
+                    "parameterName": "date_range",
+                    "queryName": "q_ds_statements"
+                  },
+                  {
+                    "parameterName": "date_range",
+                    "queryName": "q_ds_audit"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Date range (default last 7 days)"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 4,
+            "height": 2
+          }
+        }
+      ]
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "canvasBackgroundColor": {
+        "light": "#F7F9FB",
+        "dark": "#1F272D"
+      },
+      "widgetBackgroundColor": {
+        "light": "#FFFFFF",
+        "dark": "#11171C"
+      },
+      "widgetBorderColor": {
+        "light": "#FFFFFF",
+        "dark": "#11171C"
+      },
+      "fontColor": {
+        "light": "#11171C",
+        "dark": "#E8ECF0"
+      },
+      "selectionColor": {
+        "light": "#2272B4",
+        "dark": "#8ACAFF"
+      },
+      "visualizationColors": [
+        "#0072B2",
+        "#E69F00",
+        "#009E73",
+        "#CC79A7",
+        "#56B4E9",
+        "#D55E00",
+        "#F0E442"
+      ],
+      "widgetHeaderAlignment": "LEFT",
+      "widgetCornerRadius": 8
+    }
+  }
+}

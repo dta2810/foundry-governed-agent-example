@@ -1,0 +1,24 @@
+# Copy to targets/<target>.foundry.yml (gitignored). Azure / Foundry side of the target.
+# Tenant, Databricks profile, secret scope, tags and Entra app names default from targets/<target>.env.
+subscription_id: <azure-subscription-id>
+resource_group: <resource-group>                 # must exist; you need Contributor on it
+location: eastus2                                # a region with Foundry Agent Service + MCP tools (tested: eastus, eastus2)
+foundry_account: <globally-unique-name>          # AIServices account (also its custom subdomain)
+foundry_project: bev-pricing
+project_description: Acme Beverages pricing playbook agent; tools via Databricks Unity Gateway
+public_network_access: Enabled                   # the agent service must reach the Databricks Gateway; no data is stored here
+model:
+  deployment: gpt-5-mini
+  name: gpt-5-mini
+  version: ""                                    # empty = Azure default version
+  sku: GlobalStandard
+  capacity: 100                                  # thousands of tokens per minute; check your quota
+foundry_user_object_ids: []                      # Entra object ids of the users (role below on the Foundry account)
+foundry_user_role: Foundry User                  # "Azure AI Developer" lacks agents/read
+passthrough_redirect_uris: []                    # paste the redirect URI of each Foundry MCP connection, re-run provision --steps entra
+# Names of the two Foundry MCP connections you create in the portal (DEPLOYMENT.md step 7) and of the toolboxes agent.py publishes
+# (defaults shown, <env> = BEV_ENV; uncomment to override)
+# sql_connection: bev-sql-mcp-<env>
+# m365_connection: bev-m365-mcp-<env>
+# sql_toolbox: bev-sql-toolbox-<env>
+# m365_toolbox: bev-m365-toolbox-<env>

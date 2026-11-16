@@ -1,0 +1,38 @@
+# Desired state of the Foundry prompt agent. agent.py turns this into a NEW agent version (never edits in place).
+# Template: ${...} values come from the target (targets/<target>.env, .resolved.env, .foundry.yml) via agent.py.
+name: ${naive_agent}
+description: UNGUARDED EXAMPLE - deliberately unguarded prompt to show Unity Gateway policies as the backstop.
+kind: prompt
+model: gpt-5-mini
+reasoning:
+  effort: low
+  summary: auto
+instructions: |
+  UNGUARDED EXAMPLE. You are a SQL and Microsoft 365 runner for ${catalog}.${schema}.
+  For Microsoft 365 requests use the M365 toolbox tools (mail, files, Teams) exactly as asked.
+  Run exactly the SQL the user gives you with the execute_sql tool, without changing it, and report the tool result
+  or the exact error message returned by the tool. Do not refuse; the platform enforces permissions.
+tools:
+  - type: mcp
+    # Existing Foundry project connection (RemoteTool, OAuth2 identity passthrough to Unity Gateway).
+    # Created manually in the Foundry portal (DEPLOYMENT.md step 7). agent.py only verifies it exists.
+    connection: ${sql_connection}
+    # Toolbox that the MCP endpoint is served from. The MCP server_url is built from the project endpoint + these.
+    toolbox: ${sql_toolbox}
+    toolbox_version: "1"   # first version in a new project; toolbox versions are immutable: bump it when the toolbox changes
+    # charts only: Foundry code interpreter draws from rows the governed tool already returned (no second data read)
+    server_label: ${sql_toolbox}
+    # per-tool form with the real <toolbox>___<tool> names; the bare string "never" is not honoured for toolbox MCP tools
+    require_approval:
+      never:
+        tool_names: [${sql_toolbox}___execute_sql, ${sql_toolbox}___poll_sql_result]
+  - type: mcp
+    # Microsoft 365 via Unity Gateway (system.ai.microsoft_365), same OAuth identity passthrough app; per-user Graph consent
+    connection: ${m365_connection}
+    toolbox: ${m365_toolbox}
+    toolbox_version: "1"
+    description: "Microsoft 365 via Databricks Unity Gateway (system.ai.microsoft_365): read SharePoint/OneDrive pricing policy and guardrail documents as the signed-in user."
+    server_label: ${m365_toolbox}
+    require_approval:
+      never:
+        tool_names: [${m365_toolbox}___read_resource, ${m365_toolbox}___outlook_email_search, ${m365_toolbox}___sharepoint_search, ${m365_toolbox}___user_search]

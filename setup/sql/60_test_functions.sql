@@ -1,0 +1,17 @@
+SELECT market_id, channel, sku, price_index_13w, price_index_prior_13w, target_price_index_high, volume_change_pct, status FROM ${catalog}.${schema}.price_index_vs_pairs('TX', 'FZ-COLA-355C');
+SELECT market_id, channel, sku, price_index_13w, target_price_index_low, status FROM ${catalog}.${schema}.price_index_vs_pairs(NULL, NULL) WHERE status <> 'IN BAND' LIMIT 8;
+SELECT promo_event_id, discount_depth_pct, max_promo_depth_pct, above_max_depth, volume_uplift_pct, gp_uplift, gp_roi, verdict FROM ${catalog}.${schema}.promo_depth_roi('GA', 'FZ-ZERO-355C');
+SELECT discount_depth_pct, count(*) AS n, round(avg(gp_uplift), 0) AS avg_gp_uplift, round(avg(gp_roi), 3) AS avg_roi FROM ${catalog}.${schema}.promo_depth_roi(NULL, NULL) GROUP BY discount_depth_pct ORDER BY discount_depth_pct;
+SELECT market_id, pack_type, gm_pct_13w, gm_pct_prior_13w, min_gm_pct, gap_to_min_pts, lowest_gm_sku, status FROM ${catalog}.${schema}.margin_guardrails(NULL, NULL) LIMIT 5;
+SELECT market_id, channel, volume_change_pct, nsv_change_pct, gp_change_usd, price_index_13w, projected_price_index, projected_index_status FROM ${catalog}.${schema}.price_scenario_impact('FZ-COLA-355C', NULL, -0.05) WHERE market_id = 'TX';
+SELECT market_id, channel, volume_change_pct, gp_change_usd, projected_price_index, projected_index_status FROM ${catalog}.${schema}.price_scenario_impact('AP-STILL-500P', 'Modern Trade', 0.08) WHERE market_id = 'CA';
+SELECT question_id, suggested_tool FROM ${catalog}.${schema}.playbook_questions(NULL);
+SELECT market_id, MEASURE(volume_units) AS units, MEASURE(nsv_usd) AS nsv, MEASURE(gm_pct) AS gm, MEASURE(price_index_vs_pair) AS idx FROM ${catalog}.${schema}.pricing_kpis WHERE week_start > (SELECT max(week_start) FROM ${catalog}.${schema}.price_observations) - INTERVAL 91 DAYS GROUP BY market_id ORDER BY nsv DESC;
+-- new functions: TX cola above band in 3 channels (Q04), min cut into band for TX Modern Trade, GA PE-0097 in Q08, NY Glass in Q03, TX evidence size
+SELECT market_id, sku, pack_type, channel, volume_change_pct, nsv_change_pct, gp_change_usd, gm_pct_13w, gm_change_pts FROM ${catalog}.${schema}.kpi_13w_vs_prior('TX') WHERE is_total OR sku = 'FZ-COLA-355C';
+SELECT channel, price_change_pct, price_index_13w, projected_price_index, projected_index_status, gp_change_usd_weekly, gp_change_usd_13w, is_min_cut_into_band FROM ${catalog}.${schema}.price_scenario_grid('FZ-COLA-355C', 'Modern Trade', 'TX');
+SELECT count(*) AS q04_cola_above_band_channels, count(*) = 3 AS pass FROM ${catalog}.${schema}.playbook_evidence('TX') WHERE question_id = 'Q04' AND metric = 'price_index_13w' AND subject LIKE 'FZ-COLA-355C |%' AND status = 'ABOVE BAND';
+SELECT min(price_change_pct) FILTER (WHERE is_min_cut_into_band) AS min_cut, min(price_change_pct) FILTER (WHERE is_min_cut_into_band) = -0.05 AS pass FROM ${catalog}.${schema}.price_scenario_grid('FZ-COLA-355C', 'Modern Trade', 'TX');
+SELECT subject, value AS gp_uplift, status, note, value < 0 AND note LIKE '%depth 0.35%' AS pass FROM ${catalog}.${schema}.playbook_evidence('GA') WHERE question_id = 'Q08' AND subject = 'PE-0097';
+SELECT subject, value AS gap_to_min_pts, status, status = 'BELOW MIN' AS pass FROM ${catalog}.${schema}.playbook_evidence('NY') WHERE question_id = 'Q03' AND subject = 'Glass';
+SELECT count(*) AS tx_evidence_rows, count(*) < 150 AS pass, count(DISTINCT question_id) AS questions FROM ${catalog}.${schema}.playbook_evidence('TX')

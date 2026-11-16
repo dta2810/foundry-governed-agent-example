@@ -1,0 +1,14 @@
+# per-target settings and generated ids (may hold tenant/workspace ids and emails)
+targets/*
+!targets/example.env
+!targets/example.foundry.yml
+# generated
+data/out/
+data/sharepoint/out/
+dashboards/out/
+__pycache__/
+.pytest_cache/
+.venv/
+.env
+*.local.yml
+.DS_Store
